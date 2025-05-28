@@ -11,6 +11,8 @@ import math
 import functools
 from collections import OrderedDict
 from torchao.float8 import Float8LinearConfig,convert_to_float8_training,precompute_float8_dynamic_scale_for_fsdp
+from torchinfo import summary
+
 
 class LinearBlock(nn.Module):
     def __init__(self):
@@ -151,7 +153,8 @@ def fsdp_main(rank, world_size, args):
         print(f"Memory Reserved: {reserved_memory_fsdp_rank:.2f} MB")
 
     
-
+    if rank == 0:
+        summary(fsdp_model, input_size=(args.batch_size, 4096))
 
     # 优化器 (必须在模型 FSDP 包装之后创建)
     optimizer = optim.Adam(fsdp_model.parameters(), lr=args.lr)
