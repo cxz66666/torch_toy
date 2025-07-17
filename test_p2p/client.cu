@@ -84,7 +84,7 @@ int main() {
   CHECK_CUDA(cudaMemcpyAsync(local_ptr, d_ptr_imported, BUFFER_SIZE,
                              cudaMemcpyDeviceToDevice));
   std::cout << "cudaMemcpyAsync completed." << std::endl;
-  sleep(10);
+  sleep(2);
   CHECK_CUDA(cudaDeviceSynchronize());
   CHECK_CUDA(cudaMemcpy(&h_success_flag, d_success_flag, sizeof(bool),
                         cudaMemcpyDeviceToHost));
