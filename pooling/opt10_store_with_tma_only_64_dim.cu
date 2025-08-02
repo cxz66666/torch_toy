@@ -123,7 +123,7 @@ __global__ void __launch_bounds__(BLOCK_THREADS)
       const int out_offset = smem_edge_out[k_base] * emb_dim;
 
       if (smem_visit_num[k_base] <= 1) {
-        if (threadIdx.x == 0) {
+        if (lane_id == 0) {
           ptx::cp_async_bulk(
               ptx::space_global, ptx::space_shared, pooling_table + out_offset,
               smem_emb_buffer + warp_id * emb_dim, sizeof(DATA_TYPE) * emb_dim);
