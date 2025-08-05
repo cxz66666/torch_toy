@@ -40,9 +40,9 @@ def compare_f8_mm(size=(64000, 64000), dtype=torch.float8_e4m3fn) -> None:
     # perform the float8 matmul
     print(x_f8.device)
     time.sleep(2)
-    y,_= torch._scaled_mm(x_f8, w_f8, out_dtype=torch.bfloat16,
+    bias=torch.randn(x_f8.shape[0], dtype=torch.bfloat16, device='cuda')
+    y= torch._scaled_mm(x_f8, w_f8, out_dtype=torch.bfloat16, bias=bias,
                              scale_a=x_inv_s , scale_b=w_inv_s, use_fast_accum=True)
-    time.sleep(2)
 
     print(y.device)
     print(y.shape)

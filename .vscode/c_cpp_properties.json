@@ -1,0 +1,13 @@
+{
+    "configurations": [
+        {
+            "name": "Linux",
+            "includePath": [
+                "${default}",
+                "/usr/local/cuda/include"
+            ],
+            "compilerPath": "/usr/local/cuda/bin/nvcc"
+        }
+    ],
+    "version": 4
+}
