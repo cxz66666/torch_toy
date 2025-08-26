@@ -28,6 +28,7 @@ def _to_fp8_quant_kernel(
     stride_xb, stride_xm, stride_xn,
     scale,
     fp8_range: tl.constexpr,
+    is_transpose: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
 ):
@@ -45,7 +46,12 @@ def _to_fp8_quant_kernel(
     value = tl.clamp(x.to(tl.float32) * scale_factor, min=-fp8_range, max=fp8_range)
     value = value.to(y_ptr.dtype.element_ty)
     y_ptr = y_ptr + bid * M * N
-    y_ptr = y_ptr + off_m[:, None] * N + off_n[None, :]
+
+    if is_transpose:
+        y_ptr = y_ptr + off_n[None, :] * M + off_m[:, None]
+    else:
+        y_ptr = y_ptr + off_m[:, None] * N + off_n[None, :]
+
     tl.store(y_ptr, value, mask=(off_m[:, None] < M) & (off_n[None, :] < N))
 
 def _batch_granul_to_fp8_quant(x, dtype=torch.float8_e5m2, scale_tol=1e-12):
@@ -61,6 +67,7 @@ def _batch_granul_to_fp8_quant(x, dtype=torch.float8_e5m2, scale_tol=1e-12):
         x.stride(0), x.stride(1), x.stride(2),
         scale,
         fp8_range=fp8_range,
+        is_transpose=False,
     )
     return quant_x, scale
 
