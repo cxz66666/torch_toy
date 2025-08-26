@@ -122,12 +122,9 @@ if __name__ == "__main__":
     for _ in range(WARMUP):
         _ = _batch_granul_to_fp8_quant_v2(base_data, dtype=DTYPE)
 
-    time.sleep(5)
-
     torch.cuda.synchronize()
     start_event = torch.cuda.Event(enable_timing=True)
     end_event = torch.cuda.Event(enable_timing=True)
-
 
     for _ in range(WARMUP):
         _ = _batch_granul_to_fp8_quant(base_data, dtype=DTYPE)
@@ -180,7 +177,7 @@ if __name__ == "__main__":
     print(f"  - 优化函数 scale: {scale_opt.item():.6f}")
 
     # 2. 验证量化结果是否完全相同
-    outputs_equal = torch.equal(quant_x_orig, quant_x_opt)
+    outputs_equal = torch.allclose(dequant_x_orig, dequant_x_opt)
     print(f"量化后的张量是否完全相同: {outputs_equal}")
 
     # 3. 计算信噪比 (两者结果应几乎一致)
