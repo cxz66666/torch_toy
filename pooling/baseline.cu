@@ -50,57 +50,58 @@ __device__ __forceinline__ void fastAtomicAdd(DATA_TYPE *base, int64_t offset,
 //   DATA_TYPE emb_buffer[2][NUM_WARPS * EMB_DIM_STATIC];
 // };
 
-template <typename DATA_TYPE, int TILE_K_PER_BLOCK, int BLOCK_THREADS>
-__global__ void __launch_bounds__(BLOCK_THREADS)
-    gpu_pooling_forward_async_kernel(const DATA_TYPE *__restrict__ emb_table,
-                                     const int *__restrict__ edge_in,
-                                     const int *__restrict__ edge_out,
-                                     DATA_TYPE *__restrict__ pooling_table,
-                                     const int64_t emb_dim,
-                                     const int edge_length) {
-  constexpr int WARP_SIZE = 32;
-  constexpr int NUM_WARPS = BLOCK_THREADS / WARP_SIZE;
-  const int thread_id = threadIdx.x;
-  const int warp_id = thread_id / WARP_SIZE;
-  const int lane_id = thread_id % WARP_SIZE;
+#define BLOCK_READ_EMB_ 32
+// #define EMB_DIM_MAX_ 1024
+#define TILE_INDICES_ 16
 
-  // --- 动态共享内存布局 ---
-  extern __shared__ char smem_storage[];
+template <typename DATA_TYPE, int BLOCK_READ_EMB, int TILE_INDICES>
+__global__ void __launch_bounds__(512, 2)
+    gpu_pooling_forward_kernel(const DATA_TYPE *__restrict__ emb_table,
+                               const int *__restrict__ edge_in,
+                               const int *__restrict__ edge_out,
+                               DATA_TYPE *__restrict__ pooling_table,
+                               const int64_t emb_dim, const int edge_length) {
+  // the thread block size used to read indices in a tile: (block_read_indices,
+  // BLOCK_READ_EMB)
+  const int block_read_indices = blockDim.x / BLOCK_READ_EMB;
+  // In row_ids/indice_values array, for each block, traverse times.
+  const int iter_indices_block = ITER(edge_length, TILE_INDICES);
+  // In one tile, for each thread, traverse times.
+  const int iter_indices_thread = ITER(TILE_INDICES, block_read_indices);
+  // In one emb, for each thread, traverse times.
+  const int64_t iter_emb = ITER(emb_dim, BLOCK_READ_EMB);
 
-  // 1. 手动为 edge_in/edge_out 分配指针
-  int *smem_edge_in_tile = reinterpret_cast<int *>(smem_storage);
-  int *smem_edge_out_tile = smem_edge_in_tile + TILE_K_PER_BLOCK;
+  int64_t indice_value = 0;
+  int64_t row_id = 0;
 
-  // --- 计算 Block 处理的边范围 (与之前相同) ---
-  const int block_tile_start = blockIdx.x * TILE_K_PER_BLOCK;
-  if (block_tile_start >= edge_length) {
-    return;
-  }
-  const int block_tile_end =
-      min(block_tile_start + TILE_K_PER_BLOCK, edge_length);
-  const int block_tile_size = block_tile_end - block_tile_start;
+#pragma unroll
+  for (int b = 0; b < iter_indices_block; b++) {
+    const int block_offset_indices =
+        (b * gridDim.x + blockIdx.x) * TILE_INDICES;
+    if (block_offset_indices >= edge_length) {
+      return;
+    }
 
-  // --- 预加载 edge 索引 (与之前相同) ---
-  for (int i = thread_id; i < block_tile_size; i += BLOCK_THREADS) {
-    smem_edge_in_tile[i] = edge_in[block_tile_start + i];
-    smem_edge_out_tile[i] = edge_out[block_tile_start + i];
-  }
-  __syncthreads();
+    const int end = min(block_offset_indices + TILE_INDICES, edge_length);
 
-  // --- 主循环 ---
-  for (int k_base = 0; k_base < block_tile_size; k_base += NUM_WARPS) {
-    const int k_warp = k_base + warp_id;
-
-    if (k_warp < block_tile_size) {
-      // --- 数据加载阶段 ---
-      int src_emb_idx = smem_edge_in_tile[k_warp];
-      int dst_emb_idx = smem_edge_out_tile[k_warp];
-      const DATA_TYPE *gmem_src_ptr = emb_table + src_emb_idx * emb_dim;
-      DATA_TYPE *gmem_dst_ptr = pooling_table + dst_emb_idx * emb_dim;
-
-      // 循环边界现在是动态的 emb_dim
-      for (int j = lane_id; j < emb_dim; j += WARP_SIZE) {
-        atomicAdd(&gmem_dst_ptr[j], gmem_src_ptr[j]);
+#pragma unroll
+    for (int i = 0; i < iter_indices_thread; i++) {
+      const int thread_idx_indices =
+          i * block_read_indices + threadIdx.x / BLOCK_READ_EMB;
+      const int indice_idx = block_offset_indices + thread_idx_indices;
+      if (indice_idx >= end) break;
+      indice_value = edge_in[indice_idx] * emb_dim;
+      row_id = edge_out[indice_idx] * emb_dim;
+#pragma unroll
+      for (int64_t j = 0; j < iter_emb; j++) {
+        const int64_t thread_idx_emb =
+            j * BLOCK_READ_EMB + threadIdx.x % BLOCK_READ_EMB;
+        if (thread_idx_emb >= emb_dim) break;
+        const int64_t emb_idx = indice_value + thread_idx_emb;
+        // const int pooling_idx = row_id + thread_idx_emb;
+        fastAtomicAdd(reinterpret_cast<DATA_TYPE *>(pooling_table + row_id),
+                      thread_idx_emb, emb_dim,
+                      static_cast<DATA_TYPE>(emb_table[emb_idx]));
       }
     }
   }
@@ -126,8 +127,6 @@ int main() {
   // (此部分保持不变)
 
   using DataType = float;
-  const int TILE_INDICES_VAL = 256;
-  const int BLOCK_SIZE = 256;
   std::ifstream inFile("binary_data.bin", std::ios::binary);
 
   int edge_length, emb_table_length, pooling_table_length;
@@ -180,91 +179,91 @@ int main() {
       cudaMemset(d_pooling_table, 0, pooling_table_length * sizeof(DataType)));
   // ---- 5. 内核启动配置 ----
   // (此部分保持不变)
-  const dim3 blockDim(BLOCK_SIZE);
-  const dim3 gridDim(ITER(edge_length, TILE_INDICES_VAL));
+  const dim3 blockDim(512);
+  const dim3 gridDim(4096);
   std::cout << "Grid Dim: " << gridDim.x << ", Block Dim: " << blockDim.x
             << std::endl;
-  size_t smem_size = 2 * TILE_INDICES_VAL * sizeof(int);
+  size_t smem_size = 0;
   // ---- 6. 性能测试 ----
   cudaEvent_t start, stop;
   CUDA_CHECK(cudaEventCreate(&start));
   CUDA_CHECK(cudaEventCreate(&stop));
 
-  gpu_pooling_forward_async_kernel<DataType, TILE_INDICES_VAL, BLOCK_SIZE>
+  gpu_pooling_forward_kernel<DataType, BLOCK_READ_EMB_, TILE_INDICES_>
       <<<gridDim, blockDim, smem_size>>>(d_emb_table, d_edge_in, d_edge_out,
                                          d_pooling_table, emb_dim, edge_length);
 
   CUDA_CHECK(cudaDeviceSynchronize());
 
-  // int num_runs = 100;
+//   int num_runs = 100;
 
-  // // 开始正式计时
-  // CUDA_CHECK(cudaEventRecord(start));
-  // for (int i = 0; i < num_runs; ++i) {
-  //   // 在性能测试中，通常我们不把内存清零的时间算进去，假设输入buffer是准备好的
-  //   // 如果需要包含清零时间，则应将cudaMemset也放入循环
-  //   gpu_pooling_forward_async_kernel<DataType, TILE_INDICES_VAL, BLOCK_SIZE>
-  //       <<<gridDim, blockDim, smem_size>>>(d_emb_table, d_edge_in, d_edge_out,
-  //                                          d_pooling_table, emb_dim,
-  //                                          edge_length);
-  // }
-  // CUDA_CHECK(cudaEventRecord(stop));
+//   // 开始正式计时
+//   CUDA_CHECK(cudaEventRecord(start));
+//   for (int i = 0; i < num_runs; ++i) {
+//     // 在性能测试中，通常我们不把内存清零的时间算进去，假设输入buffer是准备好的
+//     // 如果需要包含清零时间，则应将cudaMemset也放入循环
+//     gpu_pooling_forward_kernel<DataType, BLOCK_READ_EMB_, TILE_INDICES_>
+//         <<<gridDim, blockDim, smem_size>>>(d_emb_table, d_edge_in, d_edge_out,
+//                                            d_pooling_table, emb_dim,
+//                                            edge_length);
+//   }
+//   CUDA_CHECK(cudaEventRecord(stop));
 
-  // CUDA_CHECK(cudaEventSynchronize(stop));
-  // float total_time = 0;
-  // CUDA_CHECK(cudaEventElapsedTime(&total_time, start, stop));
+//   CUDA_CHECK(cudaEventSynchronize(stop));
+//   float total_time = 0;
+//   CUDA_CHECK(cudaEventElapsedTime(&total_time, start, stop));
 
-  // float average_time_ms = total_time / num_runs;
-  // std::cout << "\n--- Performance Results ---" << std::endl;
-  // std::cout << "Number of test runs: " << num_runs << std::endl;
-  // std::cout << "Average kernel execution time: " << average_time_ms << " ms"
-  //           << std::endl;
+//   float average_time_ms = total_time / num_runs;
+//   std::cout << "\n--- Performance Results ---" << std::endl;
+//   std::cout << "Number of test runs: " << num_runs << std::endl;
+//   std::cout << "Average kernel execution time: " << average_time_ms << " ms"
+//             << std::endl;
 
-  // // ---- 7. 结果验证 ----
-  // std::cout << "\n--- Verification ---" << std::endl;
+//   // ---- 7. 结果验证 ----
+//   std::cout << "\n--- Verification ---" << std::endl;
 
-  // std::cout
-  //     << "Resetting GPU buffer and running kernel once for verification..."
-  //     << std::endl;
-  // CUDA_CHECK(
-  //     cudaMemset(d_pooling_table, 0, pooling_table_length * sizeof(DataType)));
+//   std::cout
+//       << "Resetting GPU buffer and running kernel once for verification..."
+//       << std::endl;
+//   CUDA_CHECK(
+//       cudaMemset(d_pooling_table, 0, pooling_table_length * sizeof(DataType)));
 
-  // // 在干净的缓冲上**只运行一次**内核以获取正确结果
-  // gpu_pooling_forward_async_kernel<DataType, TILE_INDICES_VAL, BLOCK_SIZE>
-  //     <<<gridDim, blockDim, smem_size>>>(d_emb_table, d_edge_in, d_edge_out,
-  //                                        d_pooling_table, emb_dim, edge_length);
-  // CUDA_CHECK(cudaDeviceSynchronize());  // 确保内核执行完毕
+//   // 在干净的缓冲上**只运行一次**内核以获取正确结果
+//   gpu_pooling_forward_kernel<DataType, BLOCK_READ_EMB_, TILE_INDICES_>
+//       <<<gridDim, blockDim, smem_size>>>(d_emb_table, d_edge_in, d_edge_out,
+//                                          d_pooling_table, emb_dim, edge_length);
+//   CUDA_CHECK(cudaDeviceSynchronize());  // 确保内核执行完毕
 
-  // // 将单次运行的GPU结果拷贝回CPU
-  // std::vector<DataType> h_gpu_result(pooling_table_length);
-  // CUDA_CHECK(cudaMemcpy(h_gpu_result.data(), d_pooling_table,
-  //                       h_gpu_result.size() * sizeof(DataType),
-  //                       cudaMemcpyDeviceToHost));
-  // memset(pooling_table_cpu, 0, pooling_table_length * sizeof(DataType));
-  // // 在CPU上执行相同的操作以获得参照结果
-  // std::cout << "Calculating reference result on CPU..." << std::endl;
-  // for (int i = 0; i < edge_length; ++i) {
-  //   int in_node = edge_in_cpu[i];
-  //   int out_node = edge_out_cpu[i];
-  //   for (int64_t d = 0; d < emb_dim; ++d) {
-  //     pooling_table_cpu[out_node * emb_dim + d] +=
-  //         emb_table_cpu[in_node * emb_dim + d];
-  //   }
-  // }
+//   // 将单次运行的GPU结果拷贝回CPU
+//   std::vector<DataType> h_gpu_result(pooling_table_length);
+//   CUDA_CHECK(cudaMemcpy(h_gpu_result.data(), d_pooling_table,
+//                         h_gpu_result.size() * sizeof(DataType),
+//                         cudaMemcpyDeviceToHost));
+//   memset(pooling_table_cpu, 0, pooling_table_length * sizeof(DataType));
+//   // 在CPU上执行相同的操作以获得参照结果
+//   std::cout << "Calculating reference result on CPU..." << std::endl;
+//   for (int i = 0; i < edge_length; ++i) {
+//     int in_node = edge_in_cpu[i];
+//     int out_node = edge_out_cpu[i];
+//     for (int64_t d = 0; d < emb_dim; ++d) {
+//       pooling_table_cpu[out_node * emb_dim + d] +=
+//           emb_table_cpu[in_node * emb_dim + d];
+//     }
+//   }
 
-  // // 比较CPU和GPU的结果
-  // double total_absolute_error = 0.0;
-  // for (size_t i = 0; i < pooling_table_length; ++i) {
-  //   total_absolute_error += std::abs(pooling_table_cpu[i] - h_gpu_result[i]);
-  // }
+//   // 比较CPU和GPU的结果
+//   double total_absolute_error = 0.0;
+//   for (size_t i = 0; i < pooling_table_length; ++i) {
+//     total_absolute_error += std::abs(pooling_table_cpu[i] - h_gpu_result[i]);
+//   }
 
-  // std::cout << "Total absolute error between CPU and GPU: "
-  //           << total_absolute_error << std::endl;
-  // if (total_absolute_error < 1e-1) {  // 容忍微小的浮点误差
-  //   std::cout << "Result verification PASSED." << std::endl;
-  // } else {
-  //   std::cout << "Result verification FAILED." << std::endl;
-  // }
+//   std::cout << "Total absolute error between CPU and GPU: "
+//             << total_absolute_error << std::endl;
+//   if (total_absolute_error < 1e-1) {  // 容忍微小的浮点误差
+//     std::cout << "Result verification PASSED." << std::endl;
+//   } else {
+//     std::cout << "Result verification FAILED." << std::endl;
+//   }
 
   // ---- 8. 资源清理 ----
   // (此部分保持不变)

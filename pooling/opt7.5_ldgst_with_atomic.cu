@@ -41,17 +41,17 @@ __device__ __forceinline__ void fastAtomicAdd(DATA_TYPE *base, int64_t offset,
   fastSpecializedAtomicAdd(base, offset, length, value);
 }
 
-__global__ void mark_counts_cas_kernel(const int *edge_out, int *visit_num,
-                                       int n) {
+__global__ void mark_counts_cas_kernel(const int* edge_out, int* visit_num, int n) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   int stride = gridDim.x * blockDim.x;
 
   for (; i < n; i += stride) {
-    int val = edge_out[i];
-    int *addr = &visit_num[val];
-    atomicAdd(addr, 1);
+      int val = edge_out[i];
+      int* addr = &visit_num[val];
+      atomicAdd(addr, 1);
   }
 }
+
 
 template <typename DATA_TYPE, int TILE_K_PER_BLOCK, int BLOCK_THREADS>
 __global__ void __launch_bounds__(BLOCK_THREADS)
@@ -75,6 +75,8 @@ __global__ void __launch_bounds__(BLOCK_THREADS)
   int *smem_edge_in = reinterpret_cast<int *>(smem_storage);
   int *smem_edge_out = smem_edge_in + TILE_K_PER_BLOCK;
   int *smem_visit_num = smem_edge_out + TILE_K_PER_BLOCK;
+  DATA_TYPE *smem_emb_buffer =
+      reinterpret_cast<DATA_TYPE *>(smem_edge_out + TILE_K_PER_BLOCK);
   // 计算块处理的边范围
   const int block_tile_start = blockIdx.x * TILE_K_PER_BLOCK;
   if (block_tile_start >= edge_length) return;
@@ -92,12 +94,9 @@ __global__ void __launch_bounds__(BLOCK_THREADS)
   __syncthreads();
 
   auto warp = cg::tiled_partition<WARP_SIZE>(cg::this_thread_block());
-
+ 
   int last_offset = -1;
-  // DATA_TYPE *shard_in_ptr = smem_emb_buffer + warp_id * emb_dim;
-
-  DATA_TYPE *smem_emb_buffer =
-      reinterpret_cast<DATA_TYPE *>(smem_visit_num + TILE_K_PER_BLOCK);
+  DATA_TYPE *shard_in_ptr = smem_emb_buffer + warp_id * emb_dim;
 
   // 主处理循环
   while (true) {
@@ -108,28 +107,17 @@ __global__ void __launch_bounds__(BLOCK_THREADS)
     if (k_base < block_tile_size) {
       // 计算指针偏移
       const int in_offset = smem_edge_in[k_base] * emb_dim;
-      if (in_offset != last_offset) {
-        cg::memcpy_async(warp, smem_emb_buffer + warp_id * emb_dim,
-                         emb_table + in_offset, sizeof(DATA_TYPE) * emb_dim);
+      if(in_offset != last_offset) {
+        cg::memcpy_async(warp, shard_in_ptr, emb_table + in_offset,
+            sizeof(DATA_TYPE) * emb_dim);
         cg::wait(warp);
       }
 
       last_offset = in_offset;
 
       const int out_offset = smem_edge_out[k_base] * emb_dim;
-      if (smem_visit_num[k_base] <= 1) {
-        // for (int j = lane_id; j < emb_dim; j += WARP_SIZE) {
-        //   pooling_table[out_offset + j] = shard_in_ptr[j];
-        // }
-        cg::memcpy_async(warp, pooling_table + out_offset,
-                         reinterpret_cast<const DATA_TYPE *>(smem_emb_buffer +
-                                                             warp_id * emb_dim),
-                         sizeof(DATA_TYPE) * emb_dim);
-      } else {
-        for (int j = lane_id; j < emb_dim; j += WARP_SIZE) {
-          atomicAdd(&pooling_table[out_offset + j],
-                    smem_emb_buffer[warp_id * emb_dim + j]);
-        }
+      for (int j = lane_id; j < emb_dim; j += WARP_SIZE) {
+        atomicAdd(&pooling_table[out_offset + j], shard_in_ptr[j]);
       }
     }
     k_base++;
@@ -192,7 +180,7 @@ int main() {
   int *d_visit_num;
 
   CUDA_CHECK(cudaMalloc(&d_emb_table, emb_table_length * sizeof(DataType)));
-  CUDA_CHECK(cudaMalloc(&d_edge_in, edge_length * sizeof(int)));
+  CUDA_CHECK(cudaMalloc(&d_edge_in, edge_length * sizeof(int) + 1000));
   CUDA_CHECK(cudaMalloc(&d_edge_out, edge_length * sizeof(int)));
   CUDA_CHECK(cudaMalloc(&d_visit_num, pooling_table_length * sizeof(int)));
 
@@ -208,26 +196,26 @@ int main() {
                         cudaMemcpyHostToDevice));
   CUDA_CHECK(
       cudaMemset(d_pooling_table, 0, pooling_table_length * sizeof(DataType)));
-  CUDA_CHECK(cudaMemset(d_visit_num, 0, pooling_table_length * sizeof(int)));
+  CUDA_CHECK(
+      cudaMemset(d_visit_num, 0, pooling_table_length * sizeof(int)));
 
   const dim3 blockDim(BLOCK_SIZE);
   const dim3 gridDim(ITER(edge_length, TILE_INDICES_VAL));
   std::cout << "Grid Dim: " << gridDim.x << ", Block Dim: " << blockDim.x
             << std::endl;
-  size_t smem_size = 3 * TILE_INDICES_VAL * sizeof(int) +
+  size_t smem_size = 2 * TILE_INDICES_VAL * sizeof(int) +
                      (BLOCK_SIZE / 32 * emb_dim) * sizeof(DataType);
-  emb_dim = 64;
+
   cudaEvent_t start, stop;
   CUDA_CHECK(cudaEventCreate(&start));
   CUDA_CHECK(cudaEventCreate(&stop));
 
   mark_counts_cas_kernel<<<gridDim, blockDim>>>(d_edge_out, d_visit_num,
-                                                edge_length);
+    edge_length);
   CUDA_CHECK(cudaDeviceSynchronize());
   gpu_pooling_forward_async_kernel<DataType, TILE_INDICES_VAL, BLOCK_SIZE>
       <<<gridDim, blockDim, smem_size>>>(d_emb_table, d_edge_in, d_edge_out,
-                                         d_pooling_table, emb_dim, edge_length,
-                                         d_visit_num);
+                                         d_pooling_table, emb_dim, edge_length,d_visit_num);
 
   CUDA_CHECK(cudaDeviceSynchronize());
 
@@ -262,8 +250,7 @@ int main() {
 
   // gpu_pooling_forward_async_kernel<DataType, TILE_INDICES_VAL, BLOCK_SIZE>
   //     <<<gridDim, blockDim, smem_size>>>(d_emb_table, d_edge_in, d_edge_out,
-  //                                        d_pooling_table, emb_dim, edge_length,
-  //                                        d_visit_num);
+  //                                        d_pooling_table, emb_dim, edge_length, d_visit_num);
   // CUDA_CHECK(cudaDeviceSynchronize());  // 确保内核执行完毕
 
   // std::vector<DataType> h_gpu_result(pooling_table_length);

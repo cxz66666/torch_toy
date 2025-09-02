@@ -9,7 +9,7 @@
         "type_traits": "c",
         "xtr1common": "c",
         "*.m": "matlab",
-        "*.cu": "cuda",
+        "*.cu": "cuda-cpp",
         "atomic": "cpp",
         "cctype": "cpp",
         "clocale": "cpp",

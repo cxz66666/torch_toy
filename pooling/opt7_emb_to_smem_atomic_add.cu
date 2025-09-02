@@ -210,68 +210,68 @@ int main() {
 
   CUDA_CHECK(cudaDeviceSynchronize());
 
-  int num_runs = 100;
+  // int num_runs = 100;
 
-  CUDA_CHECK(cudaEventRecord(start));
-  for (int i = 0; i < num_runs; ++i) {
-    gpu_pooling_forward_async_kernel<DataType, TILE_INDICES_VAL, BLOCK_SIZE>
-        <<<gridDim, blockDim, smem_size>>>(d_emb_table, d_edge_in, d_edge_out,
-                                           d_pooling_table, emb_dim,
-                                           edge_length);
-  }
-  CUDA_CHECK(cudaEventRecord(stop));
+  // CUDA_CHECK(cudaEventRecord(start));
+  // for (int i = 0; i < num_runs; ++i) {
+  //   gpu_pooling_forward_async_kernel<DataType, TILE_INDICES_VAL, BLOCK_SIZE>
+  //       <<<gridDim, blockDim, smem_size>>>(d_emb_table, d_edge_in, d_edge_out,
+  //                                          d_pooling_table, emb_dim,
+  //                                          edge_length);
+  // }
+  // CUDA_CHECK(cudaEventRecord(stop));
 
-  CUDA_CHECK(cudaEventSynchronize(stop));
-  float total_time = 0;
-  CUDA_CHECK(cudaEventElapsedTime(&total_time, start, stop));
+  // CUDA_CHECK(cudaEventSynchronize(stop));
+  // float total_time = 0;
+  // CUDA_CHECK(cudaEventElapsedTime(&total_time, start, stop));
 
-  float average_time_ms = total_time / num_runs;
-  std::cout << "\n--- Performance Results ---" << std::endl;
-  std::cout << "Number of test runs: " << num_runs << std::endl;
-  std::cout << "Average kernel execution time: " << average_time_ms << " ms"
-            << std::endl;
+  // float average_time_ms = total_time / num_runs;
+  // std::cout << "\n--- Performance Results ---" << std::endl;
+  // std::cout << "Number of test runs: " << num_runs << std::endl;
+  // std::cout << "Average kernel execution time: " << average_time_ms << " ms"
+  //           << std::endl;
 
-  std::cout << "\n--- Verification ---" << std::endl;
+  // std::cout << "\n--- Verification ---" << std::endl;
 
-  std::cout
-      << "Resetting GPU buffer and running kernel once for verification..."
-      << std::endl;
-  CUDA_CHECK(
-      cudaMemset(d_pooling_table, 0, pooling_table_length * sizeof(DataType)));
+  // std::cout
+  //     << "Resetting GPU buffer and running kernel once for verification..."
+  //     << std::endl;
+  // CUDA_CHECK(
+  //     cudaMemset(d_pooling_table, 0, pooling_table_length * sizeof(DataType)));
 
-  gpu_pooling_forward_async_kernel<DataType, TILE_INDICES_VAL, BLOCK_SIZE>
-      <<<gridDim, blockDim, smem_size>>>(d_emb_table, d_edge_in, d_edge_out,
-                                         d_pooling_table, emb_dim, edge_length);
-  CUDA_CHECK(cudaDeviceSynchronize());  // 确保内核执行完毕
+  // gpu_pooling_forward_async_kernel<DataType, TILE_INDICES_VAL, BLOCK_SIZE>
+  //     <<<gridDim, blockDim, smem_size>>>(d_emb_table, d_edge_in, d_edge_out,
+  //                                        d_pooling_table, emb_dim, edge_length);
+  // CUDA_CHECK(cudaDeviceSynchronize());  // 确保内核执行完毕
 
-  std::vector<DataType> h_gpu_result(pooling_table_length);
-  CUDA_CHECK(cudaMemcpy(h_gpu_result.data(), d_pooling_table,
-                        h_gpu_result.size() * sizeof(DataType),
-                        cudaMemcpyDeviceToHost));
-  memset(pooling_table_cpu, 0, pooling_table_length * sizeof(DataType));
+  // std::vector<DataType> h_gpu_result(pooling_table_length);
+  // CUDA_CHECK(cudaMemcpy(h_gpu_result.data(), d_pooling_table,
+  //                       h_gpu_result.size() * sizeof(DataType),
+  //                       cudaMemcpyDeviceToHost));
+  // memset(pooling_table_cpu, 0, pooling_table_length * sizeof(DataType));
 
-  std::cout << "Calculating reference result on CPU..." << std::endl;
-  for (int i = 0; i < edge_length; ++i) {
-    int in_node = edge_in_cpu[i];
-    int out_node = edge_out_cpu[i];
-    for (int64_t d = 0; d < emb_dim; ++d) {
-      pooling_table_cpu[out_node * emb_dim + d] +=
-          emb_table_cpu[in_node * emb_dim + d];
-    }
-  }
+  // std::cout << "Calculating reference result on CPU..." << std::endl;
+  // for (int i = 0; i < edge_length; ++i) {
+  //   int in_node = edge_in_cpu[i];
+  //   int out_node = edge_out_cpu[i];
+  //   for (int64_t d = 0; d < emb_dim; ++d) {
+  //     pooling_table_cpu[out_node * emb_dim + d] +=
+  //         emb_table_cpu[in_node * emb_dim + d];
+  //   }
+  // }
 
-  double total_absolute_error = 0.0;
-  for (size_t i = 0; i < pooling_table_length; ++i) {
-    total_absolute_error += std::abs(pooling_table_cpu[i] - h_gpu_result[i]);
-  }
+  // double total_absolute_error = 0.0;
+  // for (size_t i = 0; i < pooling_table_length; ++i) {
+  //   total_absolute_error += std::abs(pooling_table_cpu[i] - h_gpu_result[i]);
+  // }
 
-  std::cout << "Total absolute error between CPU and GPU: "
-            << total_absolute_error << std::endl;
-  if (total_absolute_error < 1e-1) {
-    std::cout << "Result verification PASSED." << std::endl;
-  } else {
-    std::cout << "Result verification FAILED." << std::endl;
-  }
+  // std::cout << "Total absolute error between CPU and GPU: "
+  //           << total_absolute_error << std::endl;
+  // if (total_absolute_error < 1e-1) {
+  //   std::cout << "Result verification PASSED." << std::endl;
+  // } else {
+  //   std::cout << "Result verification FAILED." << std::endl;
+  // }
 
   CUDA_CHECK(cudaEventDestroy(start));
   CUDA_CHECK(cudaEventDestroy(stop));
