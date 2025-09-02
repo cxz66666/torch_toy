@@ -25,28 +25,18 @@ __global__ void gpu_block_copy(const DATA_TYPE *A,
                                const int32_t *src_block_offset,
                                const int32_t *dst_block_offset,
                                const int32_t *block_copy_size, DATA_TYPE *B) {
-  const int task_idx = blockIdx.x;  // 每个CUDA块处理一个拷贝任务
+  const int src_offset = src_block_offset[blockIdx.x];
+  const int dst_offset = dst_block_offset[blockIdx.x];
+  const int copy_size = block_copy_size[blockIdx.x];
 
-  // 从全局内存中读取此任务的元数据
-  const int src_offset = src_block_offset[task_idx];
-  const int dst_offset = dst_block_offset[task_idx];
-  const int copy_size = block_copy_size[task_idx];
-
-  // 如果任务大小为0，则什么也不做
-  if (copy_size <= 0) {
-    return;
-  }
-
-  // 为当前任务创建基地址指针
   const DATA_TYPE *p_src = A + src_offset;
   DATA_TYPE *p_dst = B + dst_offset;
 
-  // 使用Grid-Stride循环，让块内所有线程协作完成拷贝
   const int tid = threadIdx.x;
   const int stride = blockDim.x;
 
   for (int i = tid; i < copy_size; i += stride) {
-    p_dst[i] = __ldg(p_src + i);
+    p_dst[i] = p_src[i];
   }
 }
 
