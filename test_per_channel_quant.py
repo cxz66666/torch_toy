@@ -430,8 +430,8 @@ def benchmark(B, M, N, provider):
     if provider == "compiled_col_major":
         ms, min_ms, max_ms = triton.testing.do_bench(lambda: compiled_fp8_quant(a, torch.float8_e4m3fn, -2), quantiles=quantiles)
     if provider == "triton_block":
-        for trans in [False]:
-            for channel in [-2]:
+        for trans in [False, True]:
+            for channel in [-1, -2]:
                 if trans:
                     a_input = a.transpose(-1, -2)
                 else:
