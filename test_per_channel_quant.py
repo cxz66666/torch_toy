@@ -46,7 +46,7 @@ def fp8_quant(
 ):
     amax = torch.amax(torch.abs(hp_tensor), dim=axiswise_dim, keepdim=True)
     fp8_range = torch.finfo(float8_dtype).max
-    scale = fp8_range / torch.clamp(amax.to(torch.float32), min=1e-12)
+    scale = torch.tensor(fp8_range) / torch.clamp(amax.to(torch.float32), min=1e-12)
     fp8_tensor = (hp_tensor.to(torch.float32) * scale).clamp(min=-fp8_range, max=fp8_range).to(float8_dtype)
     return fp8_tensor, scale
 
@@ -104,7 +104,7 @@ def fp8_per_channel_quant_kernel(
         amax = tl.maximum(amax, tl.max(x, axis=0))
 
     # 2) compute scale and store keepdim at [pid,bid,0]
-    scale = fp8_max / tl.cast(amax, tl.float32)
+    scale = tl.div_rn(fp8_max, tl.cast(amax, tl.float32))
     tl.store(scale_ptr + (pid * stride_scale_b + bid * stride_scale_m), scale)
     # 3) second pass: quantize and store
     for k0 in range(0, N, BLOCK_N):
@@ -247,7 +247,7 @@ def fp8_per_channel_quant_kernel_blockptr(
             amax_m = tl.maximum(amax_m, tl.max(x_abs, axis=1))
             x_bp1 = tl.advance(x_bp1, (0, BLOCK_N))
         safe_amax = tl.maximum(amax_m, EPS)
-        scale_m = fp8_max / tl.cast(safe_amax, tl.float32)
+        scale_m = tl.div_rn(fp8_max, tl.cast(safe_amax, tl.float32))
         scale_bp = tl.make_block_ptr(
             base=scale_ptr + pid * stride_s_b,
             shape=(M, 1),
@@ -293,7 +293,7 @@ def fp8_per_channel_quant_kernel_blockptr(
             amax_n = tl.maximum(amax_n, tl.max(x_abs, axis=0))
             x_bp1 = tl.advance(x_bp1, (BLOCK_M, 0))
         safe_amax = tl.maximum(amax_n, EPS)
-        scale_n = fp8_max / tl.cast(safe_amax, tl.float32)
+        scale_n = tl.div_rn(fp8_max, tl.cast(safe_amax, tl.float32))
         # 把 scale 写到 keepdim (B, 1, N)：只在 m=0 行写入
         scale_bp = tl.make_block_ptr(
             base=scale_ptr + pid * stride_s_b,
@@ -324,7 +324,7 @@ def fp8_per_channel_quant_kernel_blockptr(
 
 
 def fp8_quant_triton_block(
-    hp_tensor: torch.Tensor,
+    x: torch.Tensor,
     float8_dtype: torch.dtype,
     axiswise_dim: int,
     output_row_major: bool = True,
@@ -332,12 +332,8 @@ def fp8_quant_triton_block(
     if axiswise_dim not in (-1, -2):
         raise ValueError("axiswise_dim must be -1 or -2")
     reduce_along_n = True if axiswise_dim == -1 else False
-
-    x = hp_tensor
-
-    stride_x_b, stride_x_m, stride_x_n = x.stride()
-    assert stride_x_m == 1 or stride_x_n == 1
-    x_row_major = True if stride_x_n == 1 else False
+    
+    x_row_major = x.is_contiguous()
 
     B, M, N = x.shape
     if output_row_major:
@@ -345,7 +341,6 @@ def fp8_quant_triton_block(
     else:
         y = torch.empty((B, N, M), device=x.device, dtype=float8_dtype)
         y = y.transpose(-1, -2)
-    stride_y_b, stride_y_m, stride_y_n = y.stride()
     scale = torch.empty((B, M, 1) if reduce_along_n else (B, 1, N), dtype=torch.float32, device=x.device)
     stride_scale_b, stride_scale_m, stride_scale_n = scale.stride()
     
@@ -355,8 +350,8 @@ def fp8_quant_triton_block(
     fp8_per_channel_quant_kernel_blockptr[grid](
         x, y, scale,
         B, M, N,
-        stride_x_b, stride_x_m, stride_x_n,
-        stride_y_b, stride_y_m, stride_y_n,
+        x.stride(0), x.stride(1), x.stride(2),
+        y.stride(0), y.stride(1), y.stride(2),
         stride_scale_b, stride_scale_m, stride_scale_n,
         fp8_max=fp8_max,
         OUT_IS_E4M3=out_is_e4m3,
@@ -411,11 +406,11 @@ configs.append(
 
 
 DEVICE = "cuda"
-
+torch.set_printoptions(precision=20)
 
 @triton.testing.perf_report(configs)
 def benchmark(B, M, N, provider):
-    a = torch.rand((B, M, N), device=DEVICE, dtype=torch.bfloat16)
+    a = torch.randn((B, M, N), device=DEVICE, dtype=torch.bfloat16)
     quantiles = [0.5, 0.2, 0.8]
     if provider == 'native':
         ms, min_ms, max_ms = triton.testing.do_bench(lambda: fp8_quant(a, torch.float8_e4m3fn, -1), quantiles=quantiles)
@@ -444,9 +439,13 @@ def benchmark(B, M, N, provider):
                     tmp3_bf16 = tmp3.to(torch.bfloat16)
                     diff_mask = tmp1_bf16 != tmp3_bf16
                     coords = torch.nonzero(diff_mask, as_tuple=False)
-                    values = (tmp1_bf16 - tmp3_bf16)[diff_mask]
-                    for (i, j, k), v in zip(coords.tolist(), values.tolist()):
-                        print(f"位置 ({i}, {j}, {k}) 差值 = {v}")
+                    values_bf16 = (tmp1_bf16 - tmp3_bf16)[diff_mask]
+                    for (i, j, k), v_bf16 in zip(coords.tolist(), values_bf16.tolist()):
+                        print(f"位置 ({i}, {j}, {k}) 差值 = {v_bf16} {a_input[i,j,k], tmp1[i,j,k], tmp3[i,j,k]}")
+                        if channel == -1:
+                            print(f"{tmp2[i,j,0], tmp4[i,j,0]}")
+                        else:
+                            print(f"{tmp2[i,0,k], tmp4[i,0,k]}")
         
         ms , min_ms, max_ms = (1,1,1)
         # ms, min_ms, max_ms = triton.testing.do_bench(lambda: fp8_quant_triton_block(a, torch.float8_e4m3fn, -1), quantiles=quantiles)
