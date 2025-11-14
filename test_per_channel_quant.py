@@ -210,19 +210,29 @@ def fp8_quant_triton_simple(
 )
 @triton.jit
 def fp8_per_channel_quant_kernel_blockptr(
-    x_ptr, y_ptr, scale_ptr,
-    B, M, N,
-    stride_x_b, stride_x_m, stride_x_n,
-    stride_y_b, stride_y_m, stride_y_n,
-    stride_s_b, stride_s_m, stride_s_n,
+    x_ptr,
+    y_ptr,
+    scale_ptr,
+    B,
+    M,
+    N,
+    stride_x_b,
+    stride_x_m,
+    stride_x_n,
+    stride_y_b,
+    stride_y_m,
+    stride_y_n,
+    stride_s_b,
+    stride_s_m,
+    stride_s_n,
     fp8_max: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
-    REDUCE_ALONG_N: tl.constexpr,    # True: 规约 N（per-N）；False: 规约 M（per-M）
+    REDUCE_ALONG_N: tl.constexpr,  # True: 规约 N（per-N）；False: 规约 M（per-M）
     X_ROW_MAJOR: tl.constexpr,  # True: x沿着N维度连续；False: x沿着M维度连续
     Y_ROW_MAJOR: tl.constexpr,  # True: y沿着N维度连续；False: y沿着M维度连续
-    OUT_IS_E4M3: tl.constexpr,
     EPS: tl.constexpr,
+    dep_token,  # useless
 ):
     pid = tl.program_id(0)
     bid = tl.program_id(1)
@@ -238,11 +248,11 @@ def fp8_per_channel_quant_kernel_blockptr(
             strides=(stride_x_m, stride_x_n),
             offsets=(m0, 0),
             block_shape=(BLOCK_M, BLOCK_N),
-            order=(1, 0) if X_ROW_MAJOR else (0, 1)
+            order=(1, 0) if X_ROW_MAJOR else (0, 1),
         )
         x_bp1 = x_bp
         for _ in range(0, tl.cdiv(N, BLOCK_N)):
-            x_tile = tl.load(x_bp1, boundary_check=(0, 1), padding_option='zero')
+            x_tile = tl.load(x_bp1, boundary_check=(0, 1), padding_option="zero")
             x_abs = tl.abs(x_tile)
             amax_m = tl.maximum(amax_m, tl.max(x_abs, axis=1))
             x_bp1 = tl.advance(x_bp1, (0, BLOCK_N))
@@ -254,7 +264,7 @@ def fp8_per_channel_quant_kernel_blockptr(
             strides=(stride_s_m, stride_s_n),
             offsets=(m0, 0),
             block_shape=(BLOCK_M, 1),
-            order=(1, 0)
+            order=(1, 0),
         )
         tl.store(scale_bp, scale_m[:, None], boundary_check=(0,))
         x_bp2 = x_bp
@@ -264,13 +274,13 @@ def fp8_per_channel_quant_kernel_blockptr(
             strides=(stride_y_m, stride_y_n),
             offsets=(m0, 0),
             block_shape=(BLOCK_M, BLOCK_N),
-            order=(1, 0) if Y_ROW_MAJOR else (0, 1)
+            order=(1, 0) if Y_ROW_MAJOR else (0, 1),
         )
         for _ in range(0, tl.cdiv(N, BLOCK_N)):
-            x_tile = tl.load(x_bp2, boundary_check=(0, 1), padding_option='zero')
+            x_tile = tl.load(x_bp2, boundary_check=(0, 1), padding_option="zero")
             y_tile = tl.cast(x_tile, tl.float32) * scale_m[:, None]  # 广播到 (BM, BN)
             y_tile = tl.clamp(y_tile, min=-fp8_max, max=fp8_max)
-            y_fp8 = tl.cast(y_tile, tl.float8e4nv) if OUT_IS_E4M3 else tl.cast(y_tile, tl.float8e5)
+            y_fp8 = y_tile.to(y_ptr.dtype.element_ty)
             tl.store(y_bp2, y_fp8, boundary_check=(0, 1))
             x_bp2 = tl.advance(x_bp2, (0, BLOCK_N))
             y_bp2 = tl.advance(y_bp2, (0, BLOCK_N))
@@ -279,16 +289,18 @@ def fp8_per_channel_quant_kernel_blockptr(
         n0 = bid * BLOCK_N
         amax_n = tl.zeros((BLOCK_N,), dtype=tl.float32)
         x_bp = tl.make_block_ptr(
-            base=x_base,                
+            base=x_base,
             shape=(M, N),
             strides=(stride_x_m, stride_x_n),
             offsets=(0, n0),
             block_shape=(BLOCK_M, BLOCK_N),
-            order=(1, 0) if X_ROW_MAJOR else (0, 1)
+            order=(1, 0) if X_ROW_MAJOR else (0, 1),
         )
         x_bp1 = x_bp
         for _ in range(0, tl.cdiv(M, BLOCK_M)):
-            x_tile = tl.load(x_bp1, boundary_check=(0, 1), padding_option='zero')  # 检查 M,N 维度的边界
+            x_tile = tl.load(
+                x_bp1, boundary_check=(0, 1), padding_option="zero"
+            )  # 检查 M,N 维度的边界
             x_abs = tl.abs(x_tile)
             amax_n = tl.maximum(amax_n, tl.max(x_abs, axis=0))
             x_bp1 = tl.advance(x_bp1, (BLOCK_M, 0))
@@ -301,7 +313,7 @@ def fp8_per_channel_quant_kernel_blockptr(
             strides=(stride_s_m, stride_s_n),  # 注意stride_s_m 应对应 keepdim 的 m 维（这里为 1）
             offsets=(0, n0),
             block_shape=(1, BLOCK_N),
-            order=(1, 0)
+            order=(1, 0),
         )
         tl.store(scale_bp, scale_n[None, :], boundary_check=(1,))
         x_bp2 = x_bp
@@ -311,13 +323,13 @@ def fp8_per_channel_quant_kernel_blockptr(
             strides=(stride_y_m, stride_y_n),
             offsets=(0, n0),
             block_shape=(BLOCK_M, BLOCK_N),
-            order=(1, 0) if Y_ROW_MAJOR else (0, 1)
+            order=(1, 0) if Y_ROW_MAJOR else (0, 1),
         )
         for _ in range(0, tl.cdiv(M, BLOCK_M)):
-            x_tile = tl.load(x_bp2, boundary_check=(0, 1), padding_option='zero')
+            x_tile = tl.load(x_bp2, boundary_check=(0, 1), padding_option="zero")
             y_tile = tl.cast(x_tile, tl.float32) * scale_n[None, :]  # 广播到 (BM, BN)
             y_tile = tl.clamp(y_tile, min=-fp8_max, max=fp8_max)
-            y_fp8 = tl.cast(y_tile, tl.float8e4nv) if OUT_IS_E4M3 else tl.cast(y_tile, tl.float8e5)
+            y_fp8 = y_tile.to(y_ptr.dtype.element_ty)
             tl.store(y_bp2, y_fp8, boundary_check=(0, 1))
             x_bp2 = tl.advance(x_bp2, (BLOCK_M, 0))
             y_bp2 = tl.advance(y_bp2, (BLOCK_M, 0))
@@ -345,7 +357,7 @@ def fp8_quant_triton_block(
     stride_scale_b, stride_scale_m, stride_scale_n = scale.stride()
     
     fp8_max = float(torch.finfo(float8_dtype).max)
-    out_is_e4m3 = float8_dtype == torch.float8_e4m3fn
+
     grid = lambda META: (B, triton.cdiv(M, META["BLOCK_M"]), ) if reduce_along_n else (B, triton.cdiv(N, META["BLOCK_N"]),)
     fp8_per_channel_quant_kernel_blockptr[grid](
         x, y, scale,
@@ -354,11 +366,11 @@ def fp8_quant_triton_block(
         y.stride(0), y.stride(1), y.stride(2),
         stride_scale_b, stride_scale_m, stride_scale_n,
         fp8_max=fp8_max,
-        OUT_IS_E4M3=out_is_e4m3,
         REDUCE_ALONG_N=reduce_along_n,
         X_ROW_MAJOR=x_row_major,
         Y_ROW_MAJOR=output_row_major,
         EPS=1e-12,
+        dep_token=None
     )
     
     return y, scale
@@ -390,11 +402,11 @@ configs.append(
         x_vals=combine_matmul_shapes(tensor_info_dict),  # Different possible values for `x_name`
         line_arg="provider",  # Argument name whose value corresponds to a different line in the plot
 
-        line_vals=["native", "compiled", "triton", "native_col_major", "compiled_col_major", "triton_col_major"],  # Label name for the lines
-        line_names=["native", "compiled", "triton", "native_col_major", "compiled_col_major", "triton_col_major"],  # Line styles
+        # line_vals=["native", "compiled", "triton", "native_col_major", "compiled_col_major", "triton_col_major"],  # Label name for the lines
+        # line_names=["native", "compiled", "triton", "native_col_major", "compiled_col_major", "triton_col_major"],  # Line styles
 
-        # line_vals=["triton_block"],  # Label name for the lines
-        # line_names=["triton_block"],  # Line styles
+        line_vals=["triton_block"],  # Label name for the lines
+        line_names=["triton_block"],  # Line styles
 
         styles=[("green", "-"), ("yellow", "-"), ("black", "-"), ("blue", "-"), ("red", "-"), ("pink", "-")],
         # styles=[("green", "-")],
