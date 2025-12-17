@@ -385,10 +385,7 @@ int main() {
     CHECK_CUDA(cudaMemset(d_src1, 0, bytes));
 
     // 3. Grid 配置
-    // A100 上通常需要足够多的 Block 来填满 SM 并通过 Context Switch 掩盖延迟
-    // 1G 数据量足够大，Block 数量不需要非常精确，只要能占满 GPU 即可
-    // 假设 108 SMs * 32 blocks = ~3456 blocks，这里给 4096 比较稳妥
-    int threadsPerBlock = 256;
+    int threadsPerBlock = 1024;
     int numBlocks = 1; 
 
     cudaEvent_t start, stop;
