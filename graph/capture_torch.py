@@ -52,6 +52,7 @@ def compute():
     return static_output
 
 # Warmup before capture
+# torch的default stream和创建出来的stream都是non-blocking stream，不会和0号stream同步
 s = torch.cuda.Stream()
 s.wait_stream(torch.cuda.current_stream())
 with torch.cuda.stream(s):
