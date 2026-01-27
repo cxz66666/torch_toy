@@ -1,6 +1,7 @@
 import torch
 from torch.utils.cpp_extension import load_inline
 
+# CUDA_DEVICE_WAITS_ON_EXCEPTION=1 TRIGGER_ILLEGAL_ACCESS=1 python graph/capture_overlap_torch.py
 src = {
     # =================================================================
     # 1. 纯 CUDA 代码：绝不包含 <torch/extension.h>
@@ -33,6 +34,14 @@ __global__ void communication_kernel(unsigned long long total_nanosec) {
     }
 }
 
+__global__ void illegal_access_kernel(float* data) {
+    float *new_data = data;
+    if (blockIdx.x == 0 && threadIdx.x == 0) {
+        // Intentionally write to an invalid address.
+        new_data[0] = 42.0f;
+    }
+}
+
 // 定义启动函数 (Launcher)，接收原始的 cudaStream_t
 // 注意：这里不要用 at::cuda::...，只用原生 CUDA 类型
 void launch_computation_kernel(unsigned long long nanosec, cudaStream_t stream) {
@@ -41,6 +50,10 @@ void launch_computation_kernel(unsigned long long nanosec, cudaStream_t stream) 
 
 void launch_communication_kernel(unsigned long long nanosec, cudaStream_t stream) {
     communication_kernel<<<1, 1, 0, stream>>>(nanosec);
+}
+
+void launch_illegal_access_kernel(cudaStream_t stream) {
+    illegal_access_kernel<<<1, 1, 0, stream>>>(nullptr);
 }
 """,
 
@@ -56,6 +69,7 @@ void launch_communication_kernel(unsigned long long nanosec, cudaStream_t stream
 // 声明外部的 CUDA 启动函数 (在上面的 cuda 字符串中定义)
 void launch_computation_kernel(unsigned long long nanosec, cudaStream_t stream);
 void launch_communication_kernel(unsigned long long nanosec, cudaStream_t stream);
+void launch_illegal_access_kernel(cudaStream_t stream);
 
 // 暴露给 Python 的 wrapper
 void computation(unsigned long long nanosec) {
@@ -69,6 +83,11 @@ void communication(unsigned long long nanosec) {
     cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
     launch_communication_kernel(nanosec, stream);
 }
+
+void illegal_access() {
+    cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
+    launch_illegal_access_kernel(stream);
+}
 """
 }
 # Load the inline extension with stream-aware kernel launcher
@@ -76,7 +95,7 @@ nanosleep_module = load_inline(
     name="nanosleep_ext",
     cpp_sources=src["cpp"],
     cuda_sources=src["cuda"],
-    functions=["computation", "communication"],
+    functions=["computation", "communication", "illegal_access"],
     extra_cuda_cflags=[
         "-arch=sm_80", 
         "-g",  # 允许更宽松的 constexpr
@@ -169,3 +188,9 @@ with torch.cuda.nvtx.range("microbatch_overlapping (cudagraph mode)"):
     torch.cuda.current_stream().synchronize()
     end = time.time()
     print(f"microbatch_overlapping (cudagraph mode) takes: {end - start:.3f} sec")
+
+import os
+if os.getenv("TRIGGER_ILLEGAL_ACCESS") == "1":
+    print("Triggering intentional illegal memory access...")
+    nanosleep_module.illegal_access()
+    torch.cuda.current_stream().synchronize()
