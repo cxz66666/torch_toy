@@ -15,6 +15,11 @@ package, so each sample can stay self-contained.
 - `tools/`: Log parsing and one-off helper tools.
 - `scripts/`: Small operational scripts shared by the samples.
 
+## Agent Notes
+
+See `AGENTS.md` for repository-specific guidance on structure, exploration,
+sample-editing conventions, and local/remote validation commands.
+
 ## Useful Commands
 
 Run a small all-reduce smoke:
